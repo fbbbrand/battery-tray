@@ -1,6 +1,6 @@
 # Battery Tray
 
-Affiche en permanence la batterie de ton **casque** et de ta **souris Logitech** sur la barre des tâches Windows, juste à gauche de la zone de notification :
+Affiche en permanence la batterie de tes **appareils sans fil Logitech** (casque, souris, clavier…) sur la barre des tâches Windows, juste à gauche de la zone de notification :
 
 ```
  🎧⚡   🖱
@@ -34,15 +34,16 @@ irm https://raw.githubusercontent.com/fbbbrand/battery-tray/main/uninstall.ps1 |
 
 ## Appareils compatibles
 
-Pour l'instant, seuls ces modèles sont reconnus (identifiants USB codés en dur dans [`devices.py`](devices.py)) :
+Les appareils sont **détectés automatiquement** : le widget affiche une colonne par appareil trouvé (casque, souris, clavier, manette…) et se cache s'il n'y en a aucun.
 
-| Appareil | Connexion | Protocole |
+| Protocole | Appareils concernés | Batterie lue via |
 |---|---|---|
-| Logitech **PRO X 2 LIGHTSPEED** (casque) | dongle sans fil `046D:0AF7` | Logitech « Centurion » (trames 64 octets, rapport `0x51`) |
-| Logitech **PRO X3 SUPERSTRIKE** (souris) | récepteur LIGHTSPEED `046D:C54F` | HID++ 2.0, fonction `0x1004` (Unified Battery) |
-| Logitech **PRO X3 SUPERSTRIKE** (souris) | câble USB `046D:C0A9` | HID++ 2.0 |
+| **HID++ 2.0** | la plupart des souris, claviers et de nombreux casques Logitech sans fil récents, derrière un récepteur **Unifying, LIGHTSPEED ou Bolt** (jusqu'à 6 appareils par récepteur), ou branchés par câble | `0x1004` Unified Battery, `0x1000` Battery Status, `0x1001` Battery Voltage ou `0x1F20` ADC (tension convertie en %) |
+| **Centurion** | casques récents comme le **PRO X 2 LIGHTSPEED** (via leur dongle) | sous-fonction `0x0104` derrière le pont `0x0003` |
 
-D'autres souris Logitech HID++ derrière un récepteur LIGHTSPEED ont de bonnes chances de marcher en ajoutant leur identifiant dans `HidppMouse.DEFAULT_ROUTES`. Le casque n'est lu que via son dongle (pas par le câble seul).
+**Testé** avec un casque PRO X 2 LIGHTSPEED et une souris PRO X3 SUPERSTRIKE (récepteur et câble). Les autres appareils devraient marcher s'ils parlent l'un de ces protocoles, mais ne sont pas encore vérifiés : si un appareil n'apparaît pas ou affiche une valeur bizarre, ouvre une *issue* en joignant `%LOCALAPPDATA%\BatteryTray\battery_tray.log`.
+
+**Non compatibles :** les autres marques (Razer, SteelSeries, Corsair…), qui ont chacune leur propre protocole. Les appareils Logitech connectés en Bluetooth ne sont pas testés. Un appareil endormi au lancement de l'appli apparaît dès qu'il se réveille (à la lecture suivante, ≤ 60 s).
 
 ## Bon à savoir
 
@@ -68,10 +69,10 @@ python -m venv .venv
 
 | Fichier | Rôle |
 |---|---|
-| `devices.py` | lecture de la batterie (HID++ pour la souris, Centurion pour le casque) |
+| `devices.py` | découverte des appareils et lecture de la batterie (HID++, Centurion) |
 | `widget.py` | le widget posé sur la barre des tâches |
 | `app.py` | boucle de lecture, détection USB, notifications, instance unique |
 | `icons.py`, `make_icon.py` | icônes (notification et exe) |
 | `install.ps1`, `uninstall.ps1`, `build.ps1` | installation, désinstallation, compilation |
 
-Protocole du casque inspiré du travail de reverse engineering du projet [HeadsetControl](https://github.com/Sapd/HeadsetControl).
+Protocoles documentés grâce au travail de reverse engineering des projets [HeadsetControl](https://github.com/Sapd/HeadsetControl) et [Solaar](https://github.com/pwr-Solaar/Solaar).

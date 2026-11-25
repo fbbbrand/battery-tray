@@ -1,4 +1,5 @@
-"""Headset + mouse battery, shown on the taskbar next to the notification area.
+"""Battery of every Logitech wireless device found (headsets, mice, keyboards...),
+shown on the taskbar next to the notification area.
 
 Run without a console window:  .venv\\Scripts\\pythonw.exe app.py
 """
@@ -17,7 +18,7 @@ from pathlib import Path
 import hid
 import pystray
 
-from devices import LOGITECH_VID, CenturionHeadset, HidppMouse, Reading
+from devices import LOGITECH_VID, Reading, Scanner
 from icons import render
 from widget import TaskbarWidget
 
@@ -49,16 +50,18 @@ def take_over_single_instance() -> socket.socket:
     return srv
 
 
-class Device:
-    def __init__(self, kind: str, reader):
-        self.kind = kind
-        self.reader = reader
+class DeviceState:
+    """What we know about one physical device across polls."""
+
+    def __init__(self, r: Reading):
+        self.key, self.name, self.kind = r.key, r.name, r.kind
         self.last: Reading | None = None  # last online reading
         self.stale = False
         self.notified: set[int] = set()
 
     def apply(self, r: Reading) -> str | None:
         """Store a reading; return a low-battery message if one is due."""
+        self.name, self.kind = r.name, r.kind
         if not r.online:
             self.stale = self.last is not None
             return None
@@ -72,21 +75,26 @@ class Device:
                 return f"{r.name} : batterie à {r.percent} %"
         return None
 
+    def snapshot(self) -> tuple[int, bool] | None:
+        return (self.last.percent, self.last.charging) if self.last and not self.stale else None
+
     def tooltip(self) -> str:
         if self.last is None:
-            return f"{self.reader.name} : non détecté"
+            return f"{self.name} : en veille"
         if self.stale:
-            return f"{self.last.name} : en veille ({self.last.percent} %)"
-        return f"{self.last.name} : {self.last.percent} %" + (" ⚡" if self.last.charging else "")
+            return f"{self.name} : en veille ({self.last.percent} %)"
+        return f"{self.name} : {self.last.percent} %" + (" ⚡" if self.last.charging else "")
 
 
 class App:
     def __init__(self):
-        self.devices = [Device("headset", CenturionHeadset()), Device("mouse", HidppMouse())]
+        self.scanner = Scanner()
+        self.states: dict[str, DeviceState] = {}
+        self.order: list[str] = []
         self.lock = threading.Lock()
         self.stop = threading.Event()
         self.wake = threading.Event()
-        self.widget = TaskbarWidget([d.kind for d in self.devices], self.refresh_now, self.quit)
+        self.widget = TaskbarWidget(self.refresh_now, self.quit)
         # Hidden-by-default tray icon: carries notifications and a fallback menu.
         self.tray = pystray.Icon(
             "battery-tray", icon=render("headset", None), title="Batterie",
@@ -106,8 +114,8 @@ class App:
         self.widget.close()
 
     def _usb_watch_loop(self) -> None:
-        """Re-read right away when a cable is plugged/unplugged: the mouse and the
-        headset then show up (or vanish) as extra USB devices."""
+        """Re-read right away when something Logitech is plugged/unplugged
+        (a cable, a receiver, a dongle)."""
         def scan():
             return frozenset(d["product_id"] for d in hid.enumerate(LOGITECH_VID))
 
@@ -126,43 +134,61 @@ class App:
                 waited = t
                 self.wake.set()
 
+    def _poll_once(self) -> None:
+        # HID I/O happens outside the lock so the widget never freezes while a
+        # sleeping device times out.
+        readings = self.scanner.read_all()
+        messages = []
+        with self.lock:
+            keys = [r.key for r in readings]
+            for key in list(self.states):
+                if key not in keys:  # its receiver/dongle was unplugged
+                    logging.info("%s: removed", key)
+                    del self.states[key]
+            for r in readings:
+                st = self.states.get(r.key)
+                if st is None:
+                    st = self.states[r.key] = DeviceState(r)
+                    logging.info("%s: new %s", r.key, r.kind)
+                before = st.snapshot()
+                msg = st.apply(r)
+                if st.snapshot() != before:
+                    logging.info("%s: %s -> %s", r.key, before, st.snapshot())
+                if msg:
+                    messages.append(msg)
+            self.order = keys
+            self.tray.title = ("\n".join(self.states[k].tooltip() for k in keys)
+                               or "Aucun appareil Logitech détecté")[:127]
+            self._update_tray_icon()
+        for msg in messages:
+            self.tray.notify(msg, "Batterie faible")
+
     def _poll_loop(self) -> None:
         while not self.stop.is_set():
-            for d in self.devices:
-                try:
-                    # HID I/O happens outside the lock so the widget never freezes
-                    # while a sleeping mouse times out.
-                    r = d.reader.read()
-                    with self.lock:
-                        prev = (d.last.percent, d.last.charging) if d.last and not d.stale else None
-                        msg = d.apply(r)
-                    now = (r.percent, r.charging) if r.online else None
-                    if now != prev:
-                        logging.info("%s: %s -> %s", d.kind, prev, now)
-                    if msg:
-                        self.tray.notify(msg, "Batterie faible")
-                except Exception:  # one bad read must never kill the loop
-                    logging.exception("reading %s failed", d.kind)
-            with self.lock:
-                self.tray.title = "\n".join(d.tooltip() for d in self.devices)[:127]
-                self._update_tray_icon()
+            try:
+                self._poll_once()
+            except Exception:  # one bad poll must never kill the loop
+                logging.exception("poll failed")
             self.wake.wait(POLL_SECONDS)
             self.wake.clear()
 
     def _update_tray_icon(self) -> None:
-        known = [d for d in self.devices if d.last]
+        known = [s for s in self.states.values() if s.last]
         if known:
-            low = min(known, key=lambda d: d.last.percent)
+            low = min(known, key=lambda s: s.last.percent)
             self.tray.icon = render(low.kind, low.last.percent, low.last.charging, low.stale)
 
     def _tick(self) -> None:
-        """Runs on the tk thread every 500 ms: push latest state to the widget."""
+        """Runs on the tk thread every 250 ms: push the latest state to the widget."""
         with self.lock:
-            for d in self.devices:
-                if d.last is None:
-                    self.widget.set(d.kind, None, False, False)
+            items = []
+            for key in self.order:
+                s = self.states[key]
+                if s.last is None:
+                    items.append((key, s.kind, None, False, False))
                 else:
-                    self.widget.set(d.kind, d.last.percent, d.last.charging, d.stale)
+                    items.append((key, s.kind, s.last.percent, s.last.charging, s.stale))
+        self.widget.sync(items)
 
     def _control_loop(self, srv: socket.socket) -> None:
         while not self.stop.is_set():

@@ -50,6 +50,23 @@ def _draw_mouse(d: ImageDraw.ImageDraw, color, box):
     d.line((cx, y0 + 2, cx, y0 + (y1 - y0) * 0.42), fill=color, width=lw)  # button split
 
 
+def _draw_keyboard(d: ImageDraw.ImageDraw, color, box):
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    lw = max(3, int(w // 12))
+    top = y0 + h * 0.2
+    d.rounded_rectangle((x0, top, x1, y1), radius=h / 6, outline=color, width=lw)
+    key = w / 9
+    for row, y in enumerate((top + h * 0.22, top + h * 0.45)):
+        for i in range(4):
+            kx = x0 + w * 0.15 + i * key * 1.9
+            d.rectangle((kx, y, kx + key, y + key * 0.7), fill=color)
+    d.rectangle((x0 + w * 0.3, y1 - h * 0.25, x1 - w * 0.3, y1 - h * 0.15), fill=color)
+
+
+DRAWERS = {"headset": _draw_headset, "keyboard": _draw_keyboard}
+
+
 def level_color(percent: int | None, charging: bool, stale: bool) -> tuple:
     if percent is None or stale:
         return GREY
@@ -67,7 +84,7 @@ def render(kind: str, percent: int | None, charging: bool = False, stale: bool =
     d = ImageDraw.Draw(img)
     glyph_color = GREY if percent is None or stale else _fg()
     glyph_box = (16, 1, 48, 25)
-    (_draw_headset if kind == "headset" else _draw_mouse)(d, glyph_color, glyph_box)
+    DRAWERS.get(kind, _draw_mouse)(d, glyph_color, glyph_box)
 
     text = "–" if percent is None else str(percent)
     size = 40 if len(text) <= 2 else 30

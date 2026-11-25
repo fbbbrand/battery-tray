@@ -33,13 +33,16 @@ shell32 = ctypes.windll.shell32
 
 ICON_FONT = "Segoe Fluent Icons"
 TEXT_FONT = "Segoe UI Semibold"
-GLYPHS = {"headset": "", "mouse": ""}
+# Segoe Fluent Icons: Headphone, Mouse, KeyboardClassic, Game, Devices
+GLYPHS = {"headset": "", "mouse": "", "keyboard": "",
+          "gamepad": "", "device": ""}
 BOLT = ""
 
 GREEN, ORANGE, RED, GREY = "#50dc78", "#ffaa28", "#ff4b4b", "#8c8c8c"
 
 HWND_TOPMOST = wintypes.HWND(-1)  # must be a real 64-bit pointer, not a C int
 SWP_FLAGS = 0x0001 | 0x0002 | 0x0010  # NOSIZE | NOMOVE | NOACTIVATE
+SWP_MOVE_FLAGS = 0x0004 | 0x0010      # NOZORDER | NOACTIVATE
 GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE = 0x00000080, 0x08000000
 
@@ -166,8 +169,7 @@ def fullscreen_app() -> str | None:
 
 
 class TaskbarWidget:
-    def __init__(self, kinds: list[str], on_refresh: Callable[[], None],
-                 on_quit: Callable[[], None]):
+    def __init__(self, on_refresh: Callable[[], None], on_quit: Callable[[], None]):
         self.on_refresh = on_refresh
         self.on_quit = on_quit
         self.root = tk.Tk()
@@ -182,32 +184,17 @@ class TaskbarWidget:
         self.frame = tk.Frame(self.outer, bg=self.bg)
         self.frame.pack(expand=True)  # centered vertically in the taskbar height
 
-        # One column per device: symbol (+ bolt) on top, percentage below.
-        self.cells: dict[str, tuple[tk.Label, tk.Label, tk.Label]] = {}
-        for i, kind in enumerate(kinds):
-            col = tk.Frame(self.frame)
-            col.pack(side="left", padx=(GAP if i else 0, 0))
-            top = tk.Frame(col)
-            top.pack()
-            # invisible left twin of the bolt keeps the symbol centered
-            pad = tk.Label(top, text=BOLT, font=(ICON_FONT, BOLT_SIZE), bd=0, padx=0)
-            glyph = tk.Label(top, text=GLYPHS[kind], font=(ICON_FONT, GLYPH_SIZE), fg=self.fg,
-                             bd=0, padx=1)
-            bolt = tk.Label(top, text=BOLT, font=(ICON_FONT, BOLT_SIZE), fg=GREEN, bd=0, padx=0)
-            for w in (pad, glyph, bolt):
-                w.pack(side="left")
-            pct = tk.Label(col, text="–", font=(TEXT_FONT, TEXT_SIZE), fg=GREY, bd=0, pady=0)
-            pct.pack()
-            self.cells[kind] = (glyph, pct, bolt)
-            self._pads = getattr(self, "_pads", []) + [pad]
+        # One column per detected device (created on the fly by sync()).
+        self.cols: dict[str, dict] = {}
+        self._order: list[str] = []
+        self._pads: list[tk.Label] = []
+        self._bind_clicks(self.outer)
+        self._bind_clicks(self.frame)
 
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label="Rafraîchir", command=self.on_refresh)
         self.menu.add_separator()
         self.menu.add_command(label="Quitter", command=self.on_quit)
-        for w in self._all_widgets():
-            w.bind("<Button-1>", lambda e: self.on_refresh())
-            w.bind("<Button-3>", self._popup)
 
         self.hwnds: list[int] = []
         self.catcher = self._make_click_catcher()
@@ -216,8 +203,55 @@ class TaskbarWidget:
         self._fullscreen_ticks = 0
 
     # ------------------------------------------------------------------ public
-    def set(self, kind: str, percent: int | None, charging: bool, stale: bool) -> None:
-        glyph, pct, bolt = self.cells[kind]
+    def sync(self, items: list[tuple[str, str, int | None, bool, bool]]) -> None:
+        """items: (key, kind, percent, charging, stale) in display order."""
+        keys = [k for k, *_ in items]
+        for key in list(self.cols):
+            if key not in keys:  # device gone (unplugged receiver/dongle)
+                col = self.cols.pop(key)
+                self._pads.remove(col["pad"])
+                col["frame"].destroy()
+        for key, kind, *_ in items:
+            if key not in self.cols:
+                self.cols[key] = self._make_column(kind)
+        if keys != self._order:
+            for c in self.cols.values():
+                c["frame"].pack_forget()
+            for i, key in enumerate(keys):
+                self.cols[key]["frame"].pack(side="left", padx=(GAP if i else 0, 0))
+            self._order = keys
+        for key, kind, percent, charging, stale in items:
+            self._set(key, percent, charging, stale)
+
+    def _make_column(self, kind: str) -> dict:
+        """Symbol (+ charging bolt) on top, percentage below."""
+        col = tk.Frame(self.frame, bg=self.bg)
+        top = tk.Frame(col, bg=self.bg)
+        top.pack()
+        # invisible left twin of the bolt keeps the symbol centered
+        pad = tk.Label(top, text=BOLT, font=(ICON_FONT, BOLT_SIZE), bd=0, padx=0,
+                       bg=self.bg, fg=self.bg)
+        glyph = tk.Label(top, text=GLYPHS.get(kind, GLYPHS["device"]),
+                         font=(ICON_FONT, GLYPH_SIZE), fg=self.fg, bg=self.bg, bd=0, padx=1)
+        bolt = tk.Label(top, text=BOLT, font=(ICON_FONT, BOLT_SIZE), bd=0, padx=0,
+                        bg=self.bg, fg=self.bg)
+        for w in (pad, glyph, bolt):
+            w.pack(side="left")
+        pct = tk.Label(col, text="–", font=(TEXT_FONT, TEXT_SIZE), fg=GREY, bg=self.bg,
+                       bd=0, pady=0)
+        pct.pack()
+        self._pads.append(pad)
+        for w in (col, top, pad, glyph, bolt, pct):
+            self._bind_clicks(w)
+        return {"frame": col, "glyph": glyph, "pct": pct, "bolt": bolt, "pad": pad}
+
+    def _bind_clicks(self, w) -> None:
+        w.bind("<Button-1>", lambda e: self.on_refresh())
+        w.bind("<Button-3>", self._popup)
+
+    def _set(self, key: str, percent: int | None, charging: bool, stale: bool) -> None:
+        c = self.cols[key]
+        glyph, pct, bolt = c["glyph"], c["pct"], c["bolt"]
         if percent is None:
             pct.config(text="–", fg=GREY)
         else:
@@ -345,9 +379,14 @@ class TaskbarWidget:
     def _place(self) -> None:
         app = fullscreen_app()
         self._fullscreen_ticks = self._fullscreen_ticks + 1 if app else 0
+        reason = None
         if self._fullscreen_ticks >= HIDE_AFTER_TICKS:
+            reason = f"fullscreen app in front ({app})"
+        elif not self.cols:
+            reason = "no battery device detected"
+        if reason:
             if not self._hidden:
-                log.info("hidden: fullscreen app in front (%s)", app)
+                log.info("hidden: %s", reason)
                 self.root.withdraw()
                 self.catcher.withdraw()
                 self._hidden = True
@@ -372,6 +411,10 @@ class TaskbarWidget:
         if moved:
             self.root.geometry(geometry)
             self.catcher.geometry(geometry)
+            # Tk resizes borderless windows but sometimes ignores the move part
+            # of geometry(): position them through Win32 as well.
+            for hwnd in self.hwnds:
+                user32.SetWindowPos(hwnd, None, x, tt, w, h, SWP_MOVE_FLAGS)
             self._geometry = geometry
         if self._hidden:
             log.info("shown at %s", geometry)
